@@ -56,20 +56,26 @@ def analyze(filepath: str) -> AnalysisResult:
     chroma_sync = librosa.util.sync(chroma, beat_frames, aggregate=np.median)
 
     # ── 3. Recurrence matrix (self-similarity) ────────────────────────────────
-    # width=3 suppresses the main diagonal so we see non-trivial repetitions.
-    R = librosa.segment.recurrence_matrix(
-        chroma_sync,
-        width=3,
-        mode="affinity",
-        sym=True,
-    )
+    # width must satisfy: 1 <= width <= (n_beats - 1) // 2.
+    # Short files may have very few beats, so clamp accordingly.
+    n_beats = chroma_sync.shape[1]
+    max_width = max(1, (n_beats - 1) // 2)
+    rec_width = min(3, max_width)
 
-    # ── 4. Novelty / boundary curve ───────────────────────────────────────────
-    # The recurrence-enhanced novelty curve highlights segment boundaries.
-    novelty = _recurrence_novelty(R)
+    novelty = np.zeros(n_beats)
+    boundary_beats: list[int] = []
 
-    # Pick peaks in the novelty curve as segment boundaries.
-    boundary_beats = _pick_boundary_beats(novelty, beat_frames, min_gap_beats=8)
+    if n_beats >= 4:
+        R = librosa.segment.recurrence_matrix(
+            chroma_sync,
+            width=rec_width,
+            mode="affinity",
+            sym=True,
+        )
+
+        # ── 4. Novelty / boundary curve ───────────────────────────────────────
+        novelty = _recurrence_novelty(R)
+        boundary_beats = _pick_boundary_beats(novelty, beat_frames, min_gap_beats=8)
 
     # Convert boundary beat indices → time in seconds.
     if len(beat_frames) > 0:
