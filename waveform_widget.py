@@ -23,6 +23,7 @@ class WaveformWidget(FigureCanvasQTAgg):
     """Interactive waveform canvas with zoom and pan."""
 
     marker_moved = pyqtSignal(float)   # new chorus start in seconds
+    fade_changed  = pyqtSignal(float)  # new fade-in duration in seconds
 
     def __init__(self, parent=None) -> None:
         fig = Figure(figsize=(8, 2.2), tight_layout=True)
@@ -42,8 +43,10 @@ class WaveformWidget(FigureCanvasQTAgg):
 
         self._fade_in_duration: float = 0.0
         self._fade_in_artists: list = []
+        self._fade_curve: str = "linear"
 
         self._dragging: bool = False          # left-drag = move marker
+        self._dragging_fade: bool = False     # left-drag = resize fade end
         self._panning: bool = False           # middle-drag = pan view
         self._pan_x0: float = 0.0            # pixel x at pan start
         self._pan_vs0: float = 0.0           # view_start at pan start
@@ -104,6 +107,13 @@ class WaveformWidget(FigureCanvasQTAgg):
         self._redraw_fade_in()
         self.draw()
 
+    def set_fade_curve(self, curve: str) -> None:
+        """Redraw the overlay with a new curve shape ('linear', 'exponential',
+        'logarithmic', 's-curve')."""
+        self._fade_curve = curve
+        self._redraw_fade_in()
+        self.draw()
+
     def zoom_in(self) -> None:
         """Zoom in centred on the current marker position."""
         self._zoom(self._marker_time, _ZOOM_STEP)
@@ -143,8 +153,16 @@ class WaveformWidget(FigureCanvasQTAgg):
         if emit:
             self.marker_moved.emit(t)
 
+    def _fade_start(self) -> float:
+        """Time where the fade-in begins (left of the red marker line)."""
+        return max(0.0, self._marker_time - self._fade_in_duration)
+
     def _redraw_fade_in(self) -> None:
-        """Remove and re-draw the fade-in ramp overlay."""
+        """Remove and re-draw the fade-in ramp overlay using the current curve.
+
+        The fade culminates *at* the red chorus-start marker.
+        The draggable yellow line marks the beginning of the fade.
+        """
         for artist in self._fade_in_artists:
             try:
                 artist.remove()
@@ -155,27 +173,37 @@ class WaveformWidget(FigureCanvasQTAgg):
         if self._fade_in_duration <= 0:
             return
 
-        t0 = self._marker_time
-        t1 = min(t0 + self._fade_in_duration, self._duration)
+        t0 = self._fade_start()          # fade begins here (draggable yellow line)
+        t1 = self._marker_time           # fade ends here  (culminates at red line)
         if t1 <= t0:
             return
 
-        x = np.linspace(t0, t1, 120)
-        ramp = np.linspace(0.0, 1.0, 120)   # volume ramp 0 → 1
+        n = 200
+        norm = np.linspace(0.0, 1.0, n)
+        x    = np.linspace(t0, t1, n)
 
-        # Shaded region: shows the "growing" amplitude envelope.
+        if self._fade_curve == "exponential":
+            ramp = norm ** 2
+        elif self._fade_curve == "logarithmic":
+            ramp = np.sqrt(norm)
+        elif self._fade_curve == "s-curve":
+            ramp = 0.5 * (1.0 - np.cos(np.pi * norm))
+        else:
+            ramp = norm
+
+        # Filled volume envelope.
         fill = self._ax.fill_between(
             x, ramp * 1.05, -ramp * 1.05,
-            color="#ffd60a", alpha=0.12, linewidth=0, zorder=3,
+            color="#ffd60a", alpha=0.13, linewidth=0, zorder=3,
         )
-        # Top and bottom ramp guide lines.
+        # Curve guide lines (top + bottom mirror).
         (lt,) = self._ax.plot(x,  ramp * 1.05, color="#ffd60a",
-                              linewidth=1.0, alpha=0.55, zorder=3)
+                              linewidth=1.2, alpha=0.6, zorder=3)
         (lb,) = self._ax.plot(x, -ramp * 1.05, color="#ffd60a",
-                              linewidth=1.0, alpha=0.55, zorder=3)
-        # Vertical end-of-fade line.
-        vl = self._ax.axvline(t1, color="#ffd60a", linewidth=1.2,
-                              linestyle="--", alpha=0.65, zorder=3)
+                              linewidth=1.2, alpha=0.6, zorder=3)
+        # Draggable start line at t0 — solid, slightly brighter.
+        vl = self._ax.axvline(t0, color="#ffd60a", linewidth=2.0,
+                              linestyle="-", alpha=0.8, zorder=4)
         self._fade_in_artists = [fill, lt, lb, vl]
 
     def _grab_threshold(self) -> float:
@@ -214,10 +242,15 @@ class WaveformWidget(FigureCanvasQTAgg):
     # ── Mouse / scroll handlers ───────────────────────────────────────────────
 
     def _on_press(self, event) -> None:
-        if event.button == 1:                    # left — move marker
+        if event.button == 1:
             t = self._time_from_event(event)
             if t is None:
                 return
+            # Prioritise fade-start handle when it's active.
+            if self._fade_in_duration > 0:
+                if abs(t - self._fade_start()) <= self._grab_threshold():
+                    self._dragging_fade = True
+                    return
             self._set_marker(t)
             self._dragging = True
             self.draw()
@@ -230,7 +263,17 @@ class WaveformWidget(FigureCanvasQTAgg):
                 self._pan_ve0 = self._view_end
 
     def _on_motion(self, event) -> None:
-        if self._dragging:
+        if self._dragging_fade:
+            t = self._time_from_event(event)
+            if t is not None:
+                # Duration = distance from cursor to the red marker line.
+                new_dur = max(0.1, self._marker_time - t)
+                self._fade_in_duration = new_dur
+                self._redraw_fade_in()
+                self.draw()
+                self.fade_changed.emit(new_dur)
+
+        elif self._dragging:
             t = self._time_from_event(event)
             if t is not None:
                 self._set_marker(t)
@@ -263,6 +306,7 @@ class WaveformWidget(FigureCanvasQTAgg):
 
     def _on_release(self, event) -> None:
         self._dragging = False
+        self._dragging_fade = False
         self._panning = False
 
     def _on_scroll(self, event) -> None:

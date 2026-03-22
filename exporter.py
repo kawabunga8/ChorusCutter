@@ -5,6 +5,7 @@ Requires ffmpeg on $PATH for MP3 support:  brew install ffmpeg
 """
 
 import os
+import numpy as np
 from pydub import AudioSegment, effects
 
 
@@ -14,44 +15,42 @@ def export(
     start_seconds: float,
     end_seconds: float | None = None,
     fade_in_ms: int = 0,
+    fade_in_curve: str = "linear",
     fade_out_ms: int = 2000,
     normalize: bool = False,
 ) -> None:
     """
-    Load *source_path*, trim from *start_seconds* to *end_seconds*
-    (or end of file), optionally apply a fade-out, and write to *dest_path*.
+    Load *source_path*, trim, optionally fade-in/out and normalize, then write.
 
-    Output format is inferred from *dest_path*'s extension (.mp3 or .wav).
+    The fade-in is applied to the audio leading up to *start_seconds*; the
+    exported clip therefore begins *fade_in_ms* before the chorus start so
+    the fade is audible, reaching full volume exactly at start_seconds.
 
     Parameters
     ----------
-    source_path : str
-        Original audio file (MP3 or WAV).
-    dest_path : str
-        Output path.  Extension must be .mp3 or .wav.
-    start_seconds : float
-        Trim start (seconds).
-    end_seconds : float | None
-        Trim end (seconds).  None = use full remaining track.
-    fade_out_ms : int
-        Duration of the trailing fade-out in milliseconds.  0 to disable.
+    fade_in_curve : str
+        One of 'linear', 'exponential', 'logarithmic', 's-curve'.
     """
     ext = os.path.splitext(source_path)[1].lower().lstrip(".")
     audio = AudioSegment.from_file(source_path, format=ext if ext else "mp3")
 
+    # Determine actual clip boundaries.
+    fade_start_ms = max(0, int(start_seconds * 1000) - fade_in_ms)
     start_ms = int(start_seconds * 1000)
-    end_ms = int(end_seconds * 1000) if end_seconds is not None else len(audio)
+    end_ms   = int(end_seconds * 1000) if end_seconds is not None else len(audio)
 
-    start_ms = max(0, min(start_ms, len(audio)))
-    end_ms = max(start_ms, min(end_ms, len(audio)))
+    clip_start = max(0, min(fade_start_ms, len(audio)))
+    clip_end   = max(clip_start, min(end_ms, len(audio)))
 
-    trimmed = audio[start_ms:end_ms]
+    trimmed = audio[clip_start:clip_end]
 
     if normalize:
         trimmed = effects.normalize(trimmed)
 
-    if fade_in_ms > 0 and len(trimmed) > fade_in_ms:
-        trimmed = trimmed.fade_in(fade_in_ms)
+    # Actual fade length in the trimmed clip (may be shorter if near start).
+    actual_fade_ms = start_ms - clip_start
+    if actual_fade_ms > 0 and len(trimmed) > actual_fade_ms:
+        trimmed = _apply_fade_in(trimmed, actual_fade_ms, fade_in_curve)
 
     if fade_out_ms > 0 and len(trimmed) > fade_out_ms:
         trimmed = trimmed.fade_out(fade_out_ms)
@@ -65,3 +64,41 @@ def export(
         trimmed.export(dest_path, format="mp4")
     else:
         raise ValueError(f"Unsupported output format: .{out_ext}  (use .mp3 or .wav)")
+
+
+def _apply_fade_in(audio: AudioSegment, fade_ms: int, curve: str) -> AudioSegment:
+    """Apply a fade-in with the given curve shape using numpy sample manipulation."""
+    if curve == "linear":
+        return audio.fade_in(fade_ms)
+
+    fade_frames = int(audio.frame_rate * fade_ms / 1000)
+    fade_frames = min(fade_frames, int(audio.frame_count()))
+    if fade_frames == 0:
+        return audio
+
+    t = np.linspace(0.0, 1.0, fade_frames)
+    if curve == "exponential":
+        gain = t ** 2
+    elif curve == "logarithmic":
+        gain = np.sqrt(t)
+    elif curve == "s-curve":
+        gain = 0.5 * (1.0 - np.cos(np.pi * t))
+    else:
+        gain = t
+
+    sw = audio.sample_width
+    ch = audio.channels
+    dtype = {1: np.uint8, 2: np.int16, 4: np.int32}.get(sw, np.int16)
+
+    samples = np.frombuffer(audio.raw_data, dtype=dtype).copy().astype(np.float64)
+    gain_ch = np.repeat(gain, ch)[:fade_frames * ch]
+
+    if sw == 1:          # unsigned, centred at 128
+        samples[:len(gain_ch)] = (samples[:len(gain_ch)] - 128) * gain_ch + 128
+        out = np.clip(samples, 0, 255).astype(np.uint8)
+    else:
+        samples[:len(gain_ch)] *= gain_ch
+        max_v = 2 ** (8 * sw - 1)
+        out = np.clip(samples, -max_v, max_v - 1).astype(dtype)
+
+    return audio._spawn(out.tobytes())

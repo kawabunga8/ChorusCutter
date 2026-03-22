@@ -200,6 +200,7 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._waveform.marker_moved.connect(self._on_marker_moved)
+        self._waveform.fade_changed.connect(self._on_waveform_fade_changed)
         vbox.addWidget(self._waveform, stretch=1)
 
         vbox.addWidget(self._make_divider())
@@ -266,6 +267,14 @@ class MainWindow(QMainWindow):
         self._fade_in_spin.setEnabled(False)
         self._fade_in_spin.valueChanged.connect(self._on_fade_in_duration_changed)
         lo.addWidget(self._fade_in_spin)
+
+        self._fade_curve_combo = QComboBox()
+        self._fade_curve_combo.setObjectName("fmtCombo")
+        self._fade_curve_combo.addItems(["Linear", "Exponential", "Logarithmic", "S-Curve"])
+        self._fade_curve_combo.setFixedWidth(108)
+        self._fade_curve_combo.setEnabled(False)
+        self._fade_curve_combo.currentTextChanged.connect(self._on_fade_curve_changed)
+        lo.addWidget(self._fade_curve_combo)
 
         lo.addSpacing(8)
 
@@ -617,6 +626,7 @@ class MainWindow(QMainWindow):
 
     def _on_fade_in_toggled(self, checked: bool) -> None:
         self._fade_in_spin.setEnabled(checked)
+        self._fade_curve_combo.setEnabled(checked)
         self._waveform.set_fade_in(
             self._fade_in_spin.value() if checked else 0.0
         )
@@ -624,6 +634,15 @@ class MainWindow(QMainWindow):
     def _on_fade_in_duration_changed(self, value: float) -> None:
         if self._fade_in_btn.isChecked():
             self._waveform.set_fade_in(value)
+
+    def _on_fade_curve_changed(self, text: str) -> None:
+        self._waveform.set_fade_curve(text.lower())
+
+    def _on_waveform_fade_changed(self, duration: float) -> None:
+        """Waveform drag updated the fade duration — sync the spinbox."""
+        self._fade_in_spin.blockSignals(True)
+        self._fade_in_spin.setValue(duration)
+        self._fade_in_spin.blockSignals(False)
 
     def _toggle_playback(self) -> None:
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -633,7 +652,11 @@ class MainWindow(QMainWindow):
             self._player.setPosition(int(self._start_spin.value() * 1000))
             if self._fade_in_btn.isChecked():
                 fade_ms = int(self._fade_in_spin.value() * 1000)
+                # Seek to fade start (before the chorus marker) so playback
+                # naturally covers the fade region leading up to the red line.
+                fade_start_ms = max(0, int(self._start_spin.value() * 1000) - fade_ms)
                 self._audio_output.setVolume(0.0)
+                self._player.setPosition(fade_start_ms)
                 self._player.play()
                 anim = QPropertyAnimation(self._audio_output, b"volume", self)
                 anim.setDuration(fade_ms)
@@ -706,6 +729,7 @@ class MainWindow(QMainWindow):
                     start_seconds=entry.chorus_start,
                     fade_in_ms=int(self._fade_in_spin.value() * 1000)
                     if self._fade_in_btn.isChecked() else 0,
+                    fade_in_curve=self._fade_curve_combo.currentText().lower(),
                     normalize=self._norm_btn.isChecked(),
                 )
             except FileNotFoundError as exc:
