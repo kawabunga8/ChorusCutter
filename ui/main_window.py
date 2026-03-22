@@ -381,7 +381,7 @@ class MainWindow(QMainWindow):
     def _open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Audio File", "",
-            "Audio Files (*.mp3 *.wav);;All Files (*)"
+            "Audio Files (*.mp3 *.wav *.m4a *.m4p);;All Files (*)"
         )
         if not path:
             return
@@ -441,7 +441,16 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_error(self, message: str) -> None:
         self._status_label.setText("Analysis failed.")
-        QMessageBox.critical(self, "Analysis Error", message)
+        if (self._source_path or "").lower().endswith(".m4p"):
+            QMessageBox.critical(
+                self, "DRM-Protected File",
+                "M4P files are DRM-protected and cannot be opened.\n\n"
+                "To use this track, open it in the Apple Music app,\n"
+                "go to File > Convert > Create MP3 Version, then\n"
+                "open the converted file here."
+            )
+        else:
+            QMessageBox.critical(self, "Analysis Error", message)
 
     def _toggle_playback(self) -> None:
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
