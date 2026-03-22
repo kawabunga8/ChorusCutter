@@ -40,6 +40,9 @@ class WaveformWidget(FigureCanvasQTAgg):
         self._marker_time: float = 0.0
         self._marker_line = None
 
+        self._fade_in_duration: float = 0.0
+        self._fade_in_artists: list = []
+
         self._dragging: bool = False          # left-drag = move marker
         self._panning: bool = False           # middle-drag = pan view
         self._pan_x0: float = 0.0            # pixel x at pan start
@@ -66,7 +69,8 @@ class WaveformWidget(FigureCanvasQTAgg):
         self._view_start = 0.0
         self._view_end = duration
         self._ax.cla()
-        self._marker_line = None   # cla() already removed it; clear the stale ref
+        self._marker_line = None      # cla() already removed these; clear stale refs
+        self._fade_in_artists = []
         self._setup_axes()
 
         # Downsample to ~4 000 points for a fast, clean envelope display.
@@ -92,6 +96,12 @@ class WaveformWidget(FigureCanvasQTAgg):
     def set_marker(self, time_seconds: float) -> None:
         """Move the chorus marker (called externally, e.g. from spinbox)."""
         self._set_marker(time_seconds, emit=False)
+        self.draw()
+
+    def set_fade_in(self, duration_seconds: float) -> None:
+        """Draw (or erase) the fade-in ramp overlay. 0 = hidden."""
+        self._fade_in_duration = max(0.0, duration_seconds)
+        self._redraw_fade_in()
         self.draw()
 
     def zoom_in(self) -> None:
@@ -128,8 +138,45 @@ class WaveformWidget(FigureCanvasQTAgg):
         self._marker_line = self._ax.axvline(
             t, color="#ff6b6b", linewidth=1.8, zorder=5,
         )
+        # Keep fade-in overlay anchored to the marker.
+        self._redraw_fade_in()
         if emit:
             self.marker_moved.emit(t)
+
+    def _redraw_fade_in(self) -> None:
+        """Remove and re-draw the fade-in ramp overlay."""
+        for artist in self._fade_in_artists:
+            try:
+                artist.remove()
+            except ValueError:
+                pass
+        self._fade_in_artists = []
+
+        if self._fade_in_duration <= 0:
+            return
+
+        t0 = self._marker_time
+        t1 = min(t0 + self._fade_in_duration, self._duration)
+        if t1 <= t0:
+            return
+
+        x = np.linspace(t0, t1, 120)
+        ramp = np.linspace(0.0, 1.0, 120)   # volume ramp 0 → 1
+
+        # Shaded region: shows the "growing" amplitude envelope.
+        fill = self._ax.fill_between(
+            x, ramp * 1.05, -ramp * 1.05,
+            color="#ffd60a", alpha=0.12, linewidth=0, zorder=3,
+        )
+        # Top and bottom ramp guide lines.
+        (lt,) = self._ax.plot(x,  ramp * 1.05, color="#ffd60a",
+                              linewidth=1.0, alpha=0.55, zorder=3)
+        (lb,) = self._ax.plot(x, -ramp * 1.05, color="#ffd60a",
+                              linewidth=1.0, alpha=0.55, zorder=3)
+        # Vertical end-of-fade line.
+        vl = self._ax.axvline(t1, color="#ffd60a", linewidth=1.2,
+                              linestyle="--", alpha=0.65, zorder=3)
+        self._fade_in_artists = [fill, lt, lb, vl]
 
     def _grab_threshold(self) -> float:
         """Marker grab radius scales with the current view span."""

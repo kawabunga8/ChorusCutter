@@ -18,7 +18,7 @@ Layout
 import os
 from dataclasses import dataclass
 
-from PyQt6.QtCore import Qt, QSize, QThread, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QThread, QUrl, QPropertyAnimation, QEasingCurve, pyqtSignal
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFrame,
@@ -264,6 +264,7 @@ class MainWindow(QMainWindow):
         self._fade_in_spin.setValue(1.0)
         self._fade_in_spin.setFixedWidth(72)
         self._fade_in_spin.setEnabled(False)
+        self._fade_in_spin.valueChanged.connect(self._on_fade_in_duration_changed)
         lo.addWidget(self._fade_in_spin)
 
         lo.addSpacing(8)
@@ -616,13 +617,34 @@ class MainWindow(QMainWindow):
 
     def _on_fade_in_toggled(self, checked: bool) -> None:
         self._fade_in_spin.setEnabled(checked)
+        self._waveform.set_fade_in(
+            self._fade_in_spin.value() if checked else 0.0
+        )
+
+    def _on_fade_in_duration_changed(self, value: float) -> None:
+        if self._fade_in_btn.isChecked():
+            self._waveform.set_fade_in(value)
 
     def _toggle_playback(self) -> None:
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
+            self._audio_output.setVolume(1.0)
         else:
             self._player.setPosition(int(self._start_spin.value() * 1000))
-            self._player.play()
+            if self._fade_in_btn.isChecked():
+                fade_ms = int(self._fade_in_spin.value() * 1000)
+                self._audio_output.setVolume(0.0)
+                self._player.play()
+                anim = QPropertyAnimation(self._audio_output, b"volume", self)
+                anim.setDuration(fade_ms)
+                anim.setStartValue(0.0)
+                anim.setEndValue(1.0)
+                anim.setEasingCurve(QEasingCurve.Type.InQuad)
+                anim.start()
+                self._fade_anim = anim   # keep reference alive
+            else:
+                self._audio_output.setVolume(1.0)
+                self._player.play()
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         playing = state == QMediaPlayer.PlaybackState.PlayingState
