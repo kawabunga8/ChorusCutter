@@ -57,5 +57,7 @@ def export(
         trimmed.export(dest_path, format="mp3", bitrate="192k")
     elif out_ext == "wav":
         trimmed.export(dest_path, format="wav")
+    elif out_ext == "m4a":
+        trimmed.export(dest_path, format="mp4")
     else:
         raise ValueError(f"Unsupported output format: .{out_ext}  (use .mp3 or .wav)")

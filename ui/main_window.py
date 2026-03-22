@@ -3,23 +3,28 @@ main_window.py — Main PyQt6 window for Chorus Cutter.
 
 Layout
 ──────
-  ┌─ Header bar ──────────────────────────────────────────┐
-  │  [Open…]    filename.mp3          BPM: 128   3:24     │
-  ├───────────────────────────────────────────────────────┤
-  │                    Waveform                           │
-  ├─ Transport bar ───────────────────────────────────────┤
-  │  ⏱ 0:00.00   − + ⟳        [▶ Play from here] [Export]│
-  └───────────────────────────────────────────────────────┘
+  ┌─ Header ─────────────────────────────────────────────────────┐
+  │  + Add Files…          PREFIX  [2026] _ [Awards] _  [MP3 ▾] │
+  ├─ File list (220px) ─┬─ Waveform ───────────────────────────  │
+  │  ☑ song1.mp3        │                                        │
+  │    ♩ 128  •  3:24   │                                        │
+  │  ☑ song2.mp3        ├─ Transport ─────────────────────────── │
+  │    ♩ 95   •  4:01   │  START [spin]  ZOOM − + ⟳  Norm  Play │
+  ├─ Export bar ─────────┴────────────────────────────────────── │
+  │  [Select All]          [Export Selected (2)]  [Export All(3)]│
+  └──────────────────────────────────────────────────────────────┘
 """
 
 import os
-from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
-from PyQt6.QtGui import QFont
+from dataclasses import dataclass
+
+from PyQt6.QtCore import Qt, QSize, QThread, QUrl, pyqtSignal
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFrame,
     QLabel, QDoubleSpinBox, QPushButton, QFileDialog,
-    QMessageBox, QSizePolicy,
+    QMessageBox, QSizePolicy, QListWidget, QListWidgetItem,
+    QSplitter, QLineEdit, QComboBox,
 )
 
 from analyzer import analyze, AnalysisResult
@@ -29,34 +34,44 @@ from exporter import export
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 
-_BG        = "#111114"
-_SURFACE   = "#1c1c1f"
-_SURFACE2  = "#28282c"
-_BORDER    = "#38383d"
-_TEXT      = "#f2f2f7"
-_TEXT2     = "#8e8e93"
-_TEXT3     = "#48484d"
-_BLUE      = "#0a84ff"
-_GREEN     = "#30c757"
-_AMBER     = "#ff9f0a"
-_RED       = "#ff453a"
+_BG      = "#111114"
+_SURFACE = "#1c1c1f"
+_SURF2   = "#28282c"
+_BORDER  = "#38383d"
+_TEXT    = "#f2f2f7"
+_TEXT2   = "#8e8e93"
+_TEXT3   = "#48484d"
+_BLUE    = "#0a84ff"
+_GREEN   = "#30c757"
+_AMBER   = "#ff9f0a"
+
+
+# ── File entry ────────────────────────────────────────────────────────────────
+
+@dataclass
+class _FileEntry:
+    path: str
+    result: AnalysisResult | None = None
+    chorus_start: float = 0.0
+    status: str = "pending"          # pending | analysing | done | error
 
 
 # ── Background analysis worker ────────────────────────────────────────────────
 
 class _AnalysisWorker(QThread):
-    finished = pyqtSignal(object)
-    error    = pyqtSignal(str)
+    finished = pyqtSignal(int, object)   # (entry_index, AnalysisResult)
+    error    = pyqtSignal(int, str)
 
-    def __init__(self, filepath: str) -> None:
+    def __init__(self, index: int, filepath: str) -> None:
         super().__init__()
+        self._index    = index
         self._filepath = filepath
 
     def run(self) -> None:
         try:
-            self.finished.emit(analyze(self._filepath))
+            self.finished.emit(self._index, analyze(self._filepath))
         except Exception as exc:  # noqa: BLE001
-            self.error.emit(str(exc))
+            self.error.emit(self._index, str(exc))
 
 
 # ── Main window ───────────────────────────────────────────────────────────────
@@ -65,12 +80,13 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Chorus Cutter")
-        self.resize(980, 540)
-        self.setMinimumSize(680, 400)
+        self.resize(1120, 600)
+        self.setMinimumSize(820, 460)
 
-        self._source_path: str | None = None
-        self._result: AnalysisResult | None = None
+        self._entries: list[_FileEntry] = []
+        self._active_idx: int = -1
         self._worker: _AnalysisWorker | None = None
+        self._queue: list[int] = []
 
         self._audio_output = QAudioOutput()
         self._player = QMediaPlayer()
@@ -86,78 +102,119 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("root")
         self.setCentralWidget(root)
-        root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
+        vbox = QVBoxLayout(root)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
 
-        root_layout.addWidget(self._make_header())
-        root_layout.addWidget(self._make_divider())
-        root_layout.addWidget(self._make_waveform_area(), stretch=1)
-        root_layout.addWidget(self._make_divider())
-        root_layout.addWidget(self._make_transport())
+        vbox.addWidget(self._make_header())
+        vbox.addWidget(self._make_divider())
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("bodySplitter")
+        splitter.setHandleWidth(1)
+        splitter.addWidget(self._make_file_list_panel())
+        splitter.addWidget(self._make_right_panel())
+        splitter.setSizes([230, 890])
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        vbox.addWidget(splitter, stretch=1)
+
+        vbox.addWidget(self._make_divider())
+        vbox.addWidget(self._make_export_bar())
 
         self._apply_style()
+        self._refresh_export_buttons()
 
     def _make_header(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("header")
         bar.setFixedHeight(52)
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(16, 0, 16, 0)
-        layout.setSpacing(12)
+        lo = QHBoxLayout(bar)
+        lo.setContentsMargins(16, 0, 16, 0)
+        lo.setSpacing(12)
 
-        self._open_btn = QPushButton("Open…")
-        self._open_btn.setObjectName("openBtn")
-        self._open_btn.setFixedSize(72, 30)
-        self._open_btn.setShortcut("Ctrl+O")
-        self._open_btn.clicked.connect(self._open_file)
-        layout.addWidget(self._open_btn)
+        add_btn = QPushButton("+ Add Files…")
+        add_btn.setObjectName("openBtn")
+        add_btn.setFixedSize(110, 30)
+        add_btn.setShortcut("Ctrl+O")
+        add_btn.clicked.connect(self._add_files)
+        lo.addWidget(add_btn)
 
-        layout.addSpacing(8)
+        lo.addStretch()
 
-        self._filename_label = QLabel("No file loaded")
-        self._filename_label.setObjectName("filenameLabel")
-        layout.addWidget(self._filename_label, stretch=1)
+        lo.addWidget(_muted("PREFIX"))
+        lo.addSpacing(4)
 
-        self._status_label = QLabel("")
-        self._status_label.setObjectName("statusLabel")
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(self._status_label)
+        self._year_edit = QLineEdit("2026")
+        self._year_edit.setObjectName("prefixEdit")
+        self._year_edit.setFixedWidth(52)
+        self._year_edit.setMaxLength(8)
+        lo.addWidget(self._year_edit)
 
-        self._bpm_chip = _Chip("BPM", "—")
-        self._bpm_chip.setVisible(False)
-        layout.addWidget(self._bpm_chip)
+        lo.addWidget(_muted("_"))
 
-        self._dur_chip = _Chip("", "")
-        self._dur_chip.setVisible(False)
-        layout.addWidget(self._dur_chip)
+        self._prefix_edit = QLineEdit("Awards")
+        self._prefix_edit.setObjectName("prefixEdit")
+        self._prefix_edit.setFixedWidth(110)
+        lo.addWidget(self._prefix_edit)
+
+        lo.addWidget(_muted("_ filename"))
+        lo.addSpacing(16)
+
+        self._fmt_combo = QComboBox()
+        self._fmt_combo.setObjectName("fmtCombo")
+        self._fmt_combo.addItems(["MP3", "WAV"])
+        self._fmt_combo.setFixedWidth(72)
+        lo.addWidget(self._fmt_combo)
 
         return bar
 
-    def _make_waveform_area(self) -> QWidget:
-        container = QWidget()
-        container.setObjectName("waveformArea")
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
+    def _make_file_list_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("fileListPanel")
+        lo = QVBoxLayout(panel)
+        lo.setContentsMargins(0, 0, 0, 0)
+        lo.setSpacing(0)
 
-        self._waveform = WaveformWidget(container)
+        self._file_list = QListWidget()
+        self._file_list.setObjectName("fileList")
+        self._file_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self._file_list.setUniformItemSizes(True)
+        self._file_list.currentRowChanged.connect(self._on_row_changed)
+        # Update export buttons when a checkbox changes.
+        self._file_list.itemChanged.connect(lambda _: self._refresh_export_buttons())
+        lo.addWidget(self._file_list)
+
+        return panel
+
+    def _make_right_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("rightPanel")
+        vbox = QVBoxLayout(panel)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        self._waveform = WaveformWidget(panel)
         self._waveform.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._waveform.marker_moved.connect(self._on_marker_moved)
-        layout.addWidget(self._waveform)
-        return container
+        vbox.addWidget(self._waveform, stretch=1)
+
+        vbox.addWidget(self._make_divider())
+        vbox.addWidget(self._make_transport())
+
+        return panel
 
     def _make_transport(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("transport")
         bar.setFixedHeight(56)
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(16, 0, 16, 0)
-        layout.setSpacing(8)
+        lo = QHBoxLayout(bar)
+        lo.setContentsMargins(16, 0, 16, 0)
+        lo.setSpacing(8)
 
-        # ── Chorus start time ──
-        layout.addWidget(_muted_label("Start"))
+        lo.addWidget(_muted("START"))
 
         self._start_spin = QDoubleSpinBox()
         self._start_spin.setObjectName("startSpin")
@@ -167,17 +224,14 @@ class MainWindow(QMainWindow):
         self._start_spin.setFixedWidth(88)
         self._start_spin.setEnabled(False)
         self._start_spin.valueChanged.connect(self._on_spin_changed)
-        layout.addWidget(self._start_spin)
+        lo.addWidget(self._start_spin)
 
-        self._duration_label = _muted_label("")
-        layout.addWidget(self._duration_label)
+        self._dur_label = _muted("")
+        lo.addWidget(self._dur_label)
+        lo.addSpacing(20)
 
-        layout.addSpacing(20)
-
-        # ── Zoom controls ──
-        layout.addWidget(_muted_label("Zoom"))
-        layout.addSpacing(4)
-
+        lo.addWidget(_muted("ZOOM"))
+        lo.addSpacing(4)
         for symbol, tip, fn in [
             ("−", "Zoom out (scroll)", self._waveform.zoom_out),
             ("+", "Zoom in (scroll)",  self._waveform.zoom_in),
@@ -188,36 +242,63 @@ class MainWindow(QMainWindow):
             btn.setFixedSize(28, 28)
             btn.setToolTip(tip)
             btn.clicked.connect(fn)
-            layout.addWidget(btn)
+            lo.addWidget(btn)
 
-        layout.addStretch()
+        lo.addStretch()
 
-        # ── Normalize toggle ──
         self._norm_btn = QPushButton("Normalize")
         self._norm_btn.setObjectName("normBtn")
         self._norm_btn.setCheckable(True)
         self._norm_btn.setFixedSize(90, 34)
         self._norm_btn.setToolTip("Peak-normalize audio on export")
-        layout.addWidget(self._norm_btn)
+        lo.addWidget(self._norm_btn)
 
-        layout.addSpacing(8)
+        lo.addSpacing(8)
 
-        # ── Play / Export ──
         self._play_btn = QPushButton("▶  Play")
         self._play_btn.setObjectName("playBtn")
         self._play_btn.setFixedSize(120, 34)
         self._play_btn.setEnabled(False)
         self._play_btn.clicked.connect(self._toggle_playback)
-        layout.addWidget(self._play_btn)
+        lo.addWidget(self._play_btn)
 
-        layout.addSpacing(8)
+        return bar
 
-        self._export_btn = QPushButton("Export…")
-        self._export_btn.setObjectName("exportBtn")
-        self._export_btn.setFixedSize(100, 34)
-        self._export_btn.setEnabled(False)
-        self._export_btn.clicked.connect(self._export)
-        layout.addWidget(self._export_btn)
+    def _make_export_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("exportBar")
+        bar.setFixedHeight(52)
+        lo = QHBoxLayout(bar)
+        lo.setContentsMargins(16, 0, 16, 0)
+        lo.setSpacing(12)
+
+        self._sel_all_btn = QPushButton("Select All")
+        self._sel_all_btn.setObjectName("ghostBtn")
+        self._sel_all_btn.setFixedSize(96, 30)
+        self._sel_all_btn.clicked.connect(self._toggle_select_all)
+        lo.addWidget(self._sel_all_btn)
+
+        lo.addStretch()
+
+        self._export_sel_btn = QPushButton("Export Selected")
+        self._export_sel_btn.setObjectName("exportBtn")
+        self._export_sel_btn.setFixedHeight(34)
+        self._export_sel_btn.setMinimumWidth(150)
+        self._export_sel_btn.setEnabled(False)
+        self._export_sel_btn.clicked.connect(
+            lambda: self._run_export(selected_only=True)
+        )
+        lo.addWidget(self._export_sel_btn)
+
+        self._export_all_btn = QPushButton("Export All")
+        self._export_all_btn.setObjectName("exportBtn")
+        self._export_all_btn.setFixedHeight(34)
+        self._export_all_btn.setMinimumWidth(120)
+        self._export_all_btn.setEnabled(False)
+        self._export_all_btn.clicked.connect(
+            lambda: self._run_export(selected_only=False)
+        )
+        lo.addWidget(self._export_all_btn)
 
         return bar
 
@@ -231,226 +312,265 @@ class MainWindow(QMainWindow):
     # ── Stylesheet ────────────────────────────────────────────────────────────
 
     def _apply_style(self) -> None:
-        sys_font = "-apple-system, 'Helvetica Neue', Arial, sans-serif"
+        f = "-apple-system, 'Helvetica Neue', Arial, sans-serif"
         self.setStyleSheet(f"""
-            /* ── Base ── */
-            QMainWindow, QWidget#root {{
+            QMainWindow, QWidget#root, QWidget#rightPanel {{
                 background: {_BG};
             }}
-
-            /* ── Header ── */
-            QWidget#header {{
+            QWidget#header, QWidget#transport, QWidget#exportBar {{
                 background: {_SURFACE};
             }}
-            QLabel#filenameLabel {{
+            QWidget#fileListPanel {{
+                background: {_SURFACE};
+            }}
+            QSplitter#bodySplitter::handle {{
+                background: {_BORDER};
+            }}
+            QListWidget#fileList {{
+                background: {_SURFACE};
+                border: none;
+                outline: none;
                 color: {_TEXT};
-                font: bold 13px {sys_font};
+                font: 12px {f};
+                border-right: 1px solid {_BORDER};
             }}
-            QLabel#statusLabel {{
-                color: {_TEXT2};
-                font: 11px {sys_font};
+            QListWidget#fileList::item {{
+                padding: 10px 12px;
+                border-bottom: 1px solid {_SURF2};
             }}
-
-            /* ── Waveform area ── */
-            QWidget#waveformArea {{
-                background: {_BG};
+            QListWidget#fileList::item:selected {{
+                background: {_SURF2};
+                color: {_TEXT};
             }}
-
-            /* ── Transport bar ── */
-            QWidget#transport {{
-                background: {_SURFACE};
+            QListWidget#fileList::item:hover:!selected {{
+                background: #202024;
             }}
-            QLabel.muted {{
-                color: {_TEXT3};
-                font: 10px {sys_font};
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
+            QLineEdit#prefixEdit {{
+                background: {_SURF2};
+                color: {_TEXT};
+                border: 1px solid {_BORDER};
+                border-radius: 5px;
+                padding: 3px 6px;
+                font: 12px {f};
             }}
-
-            /* ── Spinbox ── */
+            QComboBox#fmtCombo {{
+                background: {_SURF2};
+                color: {_TEXT};
+                border: 1px solid {_BORDER};
+                border-radius: 5px;
+                padding: 3px 6px;
+                font: 12px {f};
+            }}
+            QComboBox#fmtCombo::drop-down {{ border: none; width: 16px; }}
+            QComboBox#fmtCombo QAbstractItemView {{
+                background: {_SURF2};
+                color: {_TEXT};
+                border: 1px solid {_BORDER};
+                selection-background-color: {_BLUE};
+            }}
             QDoubleSpinBox#startSpin {{
-                background: {_SURFACE2};
+                background: {_SURF2};
                 color: {_TEXT};
                 border: 1px solid {_BORDER};
                 border-radius: 6px;
                 padding: 3px 6px;
-                font: 13px {sys_font};
+                font: 13px {f};
                 selection-background-color: {_BLUE};
             }}
             QDoubleSpinBox#startSpin:disabled {{
                 color: {_TEXT3};
-                border-color: {_SURFACE2};
+                border-color: {_SURF2};
             }}
-            QDoubleSpinBox#startSpin::up-button, QDoubleSpinBox#startSpin::down-button {{
-                width: 0; height: 0;
-            }}
-
-            /* ── Zoom buttons ── */
+            QDoubleSpinBox#startSpin::up-button,
+            QDoubleSpinBox#startSpin::down-button {{ width: 0; height: 0; }}
             QPushButton#zoomBtn {{
                 background: transparent;
                 color: {_TEXT2};
                 border: 1px solid {_BORDER};
                 border-radius: 6px;
-                font: bold 14px {sys_font};
+                font: bold 14px {f};
                 padding: 0;
             }}
-            QPushButton#zoomBtn:hover  {{ background: {_SURFACE2}; color: {_TEXT}; }}
+            QPushButton#zoomBtn:hover  {{ background: {_SURF2}; color: {_TEXT}; }}
             QPushButton#zoomBtn:pressed {{ background: {_BORDER}; }}
-
-            /* ── Open button ── */
-            QPushButton#openBtn {{
-                background: {_SURFACE2};
+            QPushButton#openBtn, QPushButton#ghostBtn {{
+                background: {_SURF2};
                 color: {_TEXT};
                 border: 1px solid {_BORDER};
                 border-radius: 7px;
-                font: 12px {sys_font};
+                font: 12px {f};
                 padding: 0;
             }}
-            QPushButton#openBtn:hover  {{ background: {_BORDER}; }}
-            QPushButton#openBtn:pressed {{ background: #3e3e44; }}
-
-            /* ── Play button ── */
-            QPushButton#playBtn {{
-                background: {_GREEN};
-                color: #000000;
-                border: none;
-                border-radius: 8px;
-                font: bold 13px {sys_font};
+            QPushButton#openBtn:hover, QPushButton#ghostBtn:hover {{
+                background: {_BORDER};
             }}
-            QPushButton#playBtn:hover   {{ background: #38d966; }}
-            QPushButton#playBtn:pressed {{ background: #25a845; }}
-            QPushButton#playBtn:disabled {{
-                background: {_SURFACE2};
-                color: {_TEXT3};
-            }}
-
-            /* ── Export button ── */
-            QPushButton#exportBtn {{
-                background: {_BLUE};
-                color: #ffffff;
-                border: none;
-                border-radius: 8px;
-                font: bold 13px {sys_font};
-            }}
-            QPushButton#exportBtn:hover   {{ background: #1a8fff; }}
-            QPushButton#exportBtn:pressed {{ background: #0070e0; }}
-            QPushButton#exportBtn:disabled {{
-                background: {_SURFACE2};
-                color: {_TEXT3};
-            }}
-
-            /* ── Normalize toggle ── */
             QPushButton#normBtn {{
                 background: transparent;
                 color: {_TEXT2};
                 border: 1px solid {_BORDER};
                 border-radius: 8px;
-                font: 12px {sys_font};
+                font: 12px {f};
             }}
-            QPushButton#normBtn:hover   {{ background: {_SURFACE2}; color: {_TEXT}; }}
+            QPushButton#normBtn:hover   {{ background: {_SURF2}; color: {_TEXT}; }}
             QPushButton#normBtn:checked {{
                 background: #0e7a5e;
-                color: #ffffff;
+                color: #fff;
                 border-color: #0e7a5e;
-                font: bold 12px {sys_font};
+                font: bold 12px {f};
             }}
             QPushButton#normBtn:checked:hover {{ background: #13956f; }}
-
-            /* ── Divider ── */
-            QFrame#divider {{ background: {_BORDER}; border: none; }}
-
-            /* ── Chip widget internals ── */
-            QWidget#chip {{
-                background: {_SURFACE2};
-                border: 1px solid {_BORDER};
+            QPushButton#playBtn {{
+                background: {_GREEN};
+                color: #000;
+                border: none;
                 border-radius: 8px;
+                font: bold 13px {f};
             }}
-            QLabel#chipKey {{
-                color: {_TEXT3};
-                font: 10px {sys_font};
+            QPushButton#playBtn:hover   {{ background: #38d966; }}
+            QPushButton#playBtn:pressed {{ background: #25a845; }}
+            QPushButton#playBtn:disabled {{ background: {_SURF2}; color: {_TEXT3}; }}
+            QPushButton#exportBtn {{
+                background: {_BLUE};
+                color: #fff;
+                border: none;
+                border-radius: 8px;
+                font: bold 13px {f};
+                padding: 0 16px;
             }}
-            QLabel#chipVal {{
-                color: {_TEXT};
-                font: bold 12px {sys_font};
-            }}
+            QPushButton#exportBtn:hover   {{ background: #1a8fff; }}
+            QPushButton#exportBtn:pressed {{ background: #0070e0; }}
+            QPushButton#exportBtn:disabled {{ background: {_SURF2}; color: {_TEXT3}; }}
+            QFrame#divider {{ background: {_BORDER}; border: none; }}
         """)
 
+    # ── File management ───────────────────────────────────────────────────────
 
-    # ── Slots ─────────────────────────────────────────────────────────────────
-
-    def _open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open Audio File", "",
+    def _add_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add Audio Files", "",
             "Audio Files (*.mp3 *.wav *.m4a *.m4p);;All Files (*)"
         )
-        if not path:
+        for path in paths:
+            if any(e.path == path for e in self._entries):
+                continue
+            idx = len(self._entries)
+            self._entries.append(_FileEntry(path=path))
+            self._append_list_item(idx)
+            self._enqueue(idx)
+
+        self._refresh_export_buttons()
+
+    def _append_list_item(self, idx: int) -> None:
+        entry = self._entries[idx]
+        item = QListWidgetItem()
+        item.setText(self._item_text(entry))
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked)
+        item.setData(Qt.ItemDataRole.UserRole, idx)
+        item.setSizeHint(QSize(220, 54))
+        self._file_list.addItem(item)
+        if self._file_list.count() == 1:
+            self._file_list.setCurrentRow(0)
+
+    def _item_text(self, entry: _FileEntry) -> str:
+        name = os.path.basename(entry.path)
+        if entry.status == "analysing":
+            return f"{name}\n···"
+        if entry.status == "done" and entry.result:
+            dur = entry.result.duration
+            m, s = divmod(dur, 60)
+            return f"{name}\n♩ {entry.result.bpm:.0f} BPM  ·  {int(m)}:{s:04.1f}s"
+        if entry.status == "error":
+            return f"{name}\n⚠  Analysis failed"
+        return f"{name}\n—"
+
+    def _refresh_item(self, idx: int) -> None:
+        item = self._file_list.item(idx)
+        if item:
+            # Block itemChanged signal to avoid re-entrancy
+            self._file_list.blockSignals(True)
+            item.setText(self._item_text(self._entries[idx]))
+            self._file_list.blockSignals(False)
+
+    # ── Analysis queue ────────────────────────────────────────────────────────
+
+    def _enqueue(self, idx: int) -> None:
+        self._queue.append(idx)
+        if self._worker is None or not self._worker.isRunning():
+            self._process_queue()
+
+    def _process_queue(self) -> None:
+        while self._queue:
+            idx = self._queue.pop(0)
+            entry = self._entries[idx]
+            if entry.path.lower().endswith(".m4p"):
+                entry.status = "error"
+                self._refresh_item(idx)
+                continue
+            entry.status = "analysing"
+            self._refresh_item(idx)
+            self._worker = _AnalysisWorker(idx, entry.path)
+            self._worker.finished.connect(self._on_analysis_done)
+            self._worker.error.connect(self._on_analysis_error)
+            self._worker.start()
+            return  # one at a time; next starts in callback
+
+    def _on_analysis_done(self, idx: int, result: AnalysisResult) -> None:
+        entry = self._entries[idx]
+        entry.result = result
+        entry.chorus_start = result.chorus_start
+        entry.status = "done"
+        self._refresh_item(idx)
+        self._refresh_export_buttons()
+        if self._active_idx == idx:
+            self._load_active()
+        self._process_queue()
+
+    def _on_analysis_error(self, idx: int, _msg: str) -> None:
+        self._entries[idx].status = "error"
+        self._refresh_item(idx)
+        self._process_queue()
+
+    # ── Active entry ──────────────────────────────────────────────────────────
+
+    def _on_row_changed(self, row: int) -> None:
+        if row < 0:
+            return
+        if self._active_idx >= 0:
+            self._entries[self._active_idx].chorus_start = self._start_spin.value()
+        self._active_idx = row
+        self._load_active()
+
+    def _load_active(self) -> None:
+        if self._active_idx < 0:
+            return
+        entry = self._entries[self._active_idx]
+        if entry.result is None:
+            self._start_spin.setEnabled(False)
+            self._play_btn.setEnabled(False)
+            self._dur_label.setText("")
             return
 
-        self._source_path = path
-        self._player.stop()
-        self._set_controls_enabled(False)
-        self._status_label.setText("Analysing…")
-        self._bpm_chip.setVisible(False)
-        self._dur_chip.setVisible(False)
-        fname = os.path.basename(path)
-        self._filename_label.setText(fname)
-
-        # Disconnect and discard any previous worker before starting a new one.
-        if self._worker is not None:
-            self._worker.finished.disconnect()
-            self._worker.error.disconnect()
-            self._worker = None
-
-        self._worker = _AnalysisWorker(path)
-        self._worker.finished.connect(self._on_analysis_done)
-        self._worker.error.connect(self._on_analysis_error)
-        self._worker.start()
-
-    def _on_analysis_done(self, result: AnalysisResult) -> None:
-        self._result = result
-
+        r = entry.result
         self._waveform.load(
-            y=result.y,
-            sr=result.sr,
-            duration=result.duration,
-            boundaries=result.section_boundaries,
-            chorus_start=result.chorus_start,
+            y=r.y, sr=r.sr, duration=r.duration,
+            boundaries=r.section_boundaries,
+            chorus_start=entry.chorus_start,
         )
-
-        self._bpm_chip.set_value(f"{result.bpm:.0f}")
-        self._bpm_chip.setVisible(True)
-
-        mins, secs = divmod(result.duration, 60)
-        self._dur_chip.set_key("")
-        self._dur_chip.set_value(f"{int(mins)}:{secs:05.2f}")
-        self._dur_chip.setVisible(True)
-
         self._start_spin.blockSignals(True)
-        self._start_spin.setMaximum(result.duration)
-        self._start_spin.setValue(result.chorus_start)
+        self._start_spin.setMaximum(r.duration)
+        self._start_spin.setValue(entry.chorus_start)
         self._start_spin.blockSignals(False)
 
-        mins, secs = divmod(result.duration, 60)
-        self._duration_label.setText(f"/ {int(mins)}:{secs:05.2f}")
-
-        self._status_label.setText("")
-        self._set_controls_enabled(True)
+        m, s = divmod(r.duration, 60)
+        self._dur_label.setText(f"/ {int(m)}:{s:05.2f}")
+        self._start_spin.setEnabled(True)
+        self._play_btn.setEnabled(True)
 
         self._player.stop()
-        self._player.setSource(QUrl.fromLocalFile(self._source_path or ""))
+        self._player.setSource(QUrl.fromLocalFile(entry.path))
 
-    def _on_analysis_error(self, message: str) -> None:
-        self._status_label.setText("Analysis failed.")
-        if (self._source_path or "").lower().endswith(".m4p"):
-            QMessageBox.critical(
-                self, "DRM-Protected File",
-                "M4P files are DRM-protected and cannot be opened.\n\n"
-                "To use this track, open it in the Apple Music app,\n"
-                "go to File > Convert > Create MP3 Version, then\n"
-                "open the converted file here."
-            )
-        else:
-            QMessageBox.critical(self, "Analysis Error", message)
+    # ── Transport ─────────────────────────────────────────────────────────────
 
     def _toggle_playback(self) -> None:
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -460,107 +580,116 @@ class MainWindow(QMainWindow):
             self._player.play()
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self._play_btn.setText("⏸  Pause")
-            self._play_btn.setStyleSheet(f"""
-                QPushButton#playBtn {{
-                    background: {_AMBER};
-                    color: #000000;
-                    border: none; border-radius: 8px;
-                    font: bold 13px -apple-system;
-                }}
-                QPushButton#playBtn:hover   {{ background: #ffb340; }}
-                QPushButton#playBtn:pressed {{ background: #e08800; }}
-            """)
-        else:
-            self._play_btn.setText("▶  Play")
-            self._play_btn.setStyleSheet("")   # revert to global stylesheet
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self._play_btn.setText("⏸  Pause" if playing else "▶  Play")
+        f = "-apple-system"
+        self._play_btn.setStyleSheet(
+            f"QPushButton#playBtn {{ background: {_AMBER}; color: #000; border: none;"
+            f" border-radius: 8px; font: bold 13px {f}; }}"
+            f"QPushButton#playBtn:hover {{ background: #ffb340; }}"
+            if playing else ""
+        )
 
     def _on_marker_moved(self, t: float) -> None:
         self._start_spin.blockSignals(True)
         self._start_spin.setValue(t)
         self._start_spin.blockSignals(False)
+        if self._active_idx >= 0:
+            self._entries[self._active_idx].chorus_start = t
 
     def _on_spin_changed(self, value: float) -> None:
         self._waveform.set_marker(value)
+        if self._active_idx >= 0:
+            self._entries[self._active_idx].chorus_start = value
 
-    def _export(self) -> None:
-        if self._result is None or self._source_path is None:
-            return
-        dest_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Trimmed Audio", "",
-            "MP3 (*.mp3);;WAV (*.wav)"
-        )
-        if not dest_path:
-            return
-        try:
-            export(
-                source_path=self._source_path,
-                dest_path=dest_path,
-                start_seconds=self._start_spin.value(),
-                normalize=self._norm_btn.isChecked(),
+    # ── Export ────────────────────────────────────────────────────────────────
+
+    def _output_filename(self, entry: _FileEntry) -> str:
+        year   = self._year_edit.text().strip()
+        prefix = self._prefix_edit.text().strip()
+        stem   = os.path.splitext(os.path.basename(entry.path))[0]
+        ext    = self._fmt_combo.currentText().lower()
+        parts  = [p for p in (year, prefix, stem) if p]
+        return "_".join(parts) + f".{ext}"
+
+    def _run_export(self, selected_only: bool) -> None:
+        to_export = [
+            self._entries[i]
+            for i in range(self._file_list.count())
+            if self._entries[i].result is not None
+            and (
+                not selected_only
+                or self._file_list.item(i).checkState() == Qt.CheckState.Checked
             )
-        except FileNotFoundError as exc:
-            if "ffprobe" in str(exc) or "ffmpeg" in str(exc):
-                QMessageBox.critical(
-                    self, "ffmpeg Not Found",
-                    "Exporting MP3 requires ffmpeg.\n\n"
-                    "Install it with:\n    brew install ffmpeg\n\n"
-                    "Then try again."
+        ]
+        if not to_export:
+            return
+
+        dest_dir = QFileDialog.getExistingDirectory(self, "Choose Export Folder")
+        if not dest_dir:
+            return
+
+        errors: list[str] = []
+        for entry in to_export:
+            dest = os.path.join(dest_dir, self._output_filename(entry))
+            try:
+                export(
+                    source_path=entry.path,
+                    dest_path=dest,
+                    start_seconds=entry.chorus_start,
+                    normalize=self._norm_btn.isChecked(),
                 )
-            else:
-                QMessageBox.critical(self, "Export Error", str(exc))
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Export Error", str(exc))
+            except FileNotFoundError as exc:
+                if "ffprobe" in str(exc) or "ffmpeg" in str(exc):
+                    QMessageBox.critical(
+                        self, "ffmpeg Not Found",
+                        "Exporting requires ffmpeg.\n\nInstall: brew install ffmpeg"
+                    )
+                    return
+                errors.append(f"{os.path.basename(entry.path)}: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{os.path.basename(entry.path)}: {exc}")
 
-    def _set_controls_enabled(self, enabled: bool) -> None:
-        self._start_spin.setEnabled(enabled)
-        self._play_btn.setEnabled(enabled)
-        self._export_btn.setEnabled(enabled)
+        if errors:
+            QMessageBox.warning(self, "Export Errors", "\n".join(errors))
+
+    # ── Select all / none ─────────────────────────────────────────────────────
+
+    def _toggle_select_all(self) -> None:
+        n = self._file_list.count()
+        all_on = all(
+            self._file_list.item(i).checkState() == Qt.CheckState.Checked
+            for i in range(n)
+        ) if n else False
+        state = Qt.CheckState.Unchecked if all_on else Qt.CheckState.Checked
+        self._file_list.blockSignals(True)
+        for i in range(n):
+            self._file_list.item(i).setCheckState(state)
+        self._file_list.blockSignals(False)
+        self._sel_all_btn.setText("Deselect All" if not all_on else "Select All")
+        self._refresh_export_buttons()
+
+    def _refresh_export_buttons(self) -> None:
+        n_ready = sum(1 for e in self._entries if e.result is not None)
+        n_checked = sum(
+            1 for i in range(self._file_list.count())
+            if self._entries[i].result is not None
+            and self._file_list.item(i).checkState() == Qt.CheckState.Checked
+        )
+        fmt = self._fmt_combo.currentText()
+        self._export_sel_btn.setText(
+            f"Export Selected ({n_checked})" if n_checked else "Export Selected"
+        )
+        self._export_all_btn.setText(
+            f"Export All ({n_ready})" if n_ready else "Export All"
+        )
+        self._export_sel_btn.setEnabled(n_checked > 0)
+        self._export_all_btn.setEnabled(n_ready > 0)
 
 
-# ── Helper widgets ─────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _muted_label(text: str) -> QLabel:
+def _muted(text: str) -> QLabel:
     lbl = QLabel(text)
-    lbl.setProperty("class", "muted")
-    lbl.setObjectName("mutedLabel")
-    lbl.setStyleSheet(f"color: #48484d; font: 10px -apple-system;")
+    lbl.setStyleSheet("color: #48484d; font: 10px -apple-system;")
     return lbl
-
-
-class _Chip(QWidget):
-    """Small pill showing a key + value pair (e.g. 'BPM  128')."""
-
-    def __init__(self, key: str, value: str, parent=None) -> None:
-        super().__init__(parent)
-        self.setObjectName("chip")
-        self.setFixedHeight(30)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 0, 10, 0)
-        layout.setSpacing(5)
-
-        self._key_lbl = QLabel(key)
-        self._key_lbl.setObjectName("chipKey")
-        layout.addWidget(self._key_lbl)
-
-        self._val_lbl = QLabel(value)
-        self._val_lbl.setObjectName("chipVal")
-        layout.addWidget(self._val_lbl)
-
-        self._update_width()
-
-    def set_key(self, key: str) -> None:
-        self._key_lbl.setText(key)
-        self._update_width()
-
-    def set_value(self, value: str) -> None:
-        self._val_lbl.setText(value)
-        self._update_width()
-
-    def _update_width(self) -> None:
-        key = self._key_lbl.text()
-        val = self._val_lbl.text()
-        chars = len(key) + len(val) + (2 if key else 0)
-        self.setFixedWidth(max(60, chars * 8 + 20))
