@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+ChorusCutter.app/
+*.mp3
+*.wav
