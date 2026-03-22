@@ -86,6 +86,7 @@ class MainWindow(QMainWindow):
         self._entries: list[_FileEntry] = []
         self._active_idx: int = -1
         self._worker: _AnalysisWorker | None = None
+        self._worker_running: bool = False
         self._queue: list[int] = []
 
         self._audio_output = QAudioOutput()
@@ -245,6 +246,27 @@ class MainWindow(QMainWindow):
             lo.addWidget(btn)
 
         lo.addStretch()
+
+        self._fade_in_btn = QPushButton("Fade In")
+        self._fade_in_btn.setObjectName("normBtn")   # reuse ghost/toggle style
+        self._fade_in_btn.setCheckable(True)
+        self._fade_in_btn.setFixedSize(72, 34)
+        self._fade_in_btn.setToolTip("Apply fade-in on export")
+        self._fade_in_btn.toggled.connect(self._on_fade_in_toggled)
+        lo.addWidget(self._fade_in_btn)
+
+        self._fade_in_spin = QDoubleSpinBox()
+        self._fade_in_spin.setObjectName("startSpin")
+        self._fade_in_spin.setRange(0.1, 30.0)
+        self._fade_in_spin.setDecimals(1)
+        self._fade_in_spin.setSingleStep(0.1)
+        self._fade_in_spin.setSuffix(" s")
+        self._fade_in_spin.setValue(1.0)
+        self._fade_in_spin.setFixedWidth(72)
+        self._fade_in_spin.setEnabled(False)
+        lo.addWidget(self._fade_in_spin)
+
+        lo.addSpacing(8)
 
         self._norm_btn = QPushButton("Normalize")
         self._norm_btn.setObjectName("normBtn")
@@ -461,6 +483,10 @@ class MainWindow(QMainWindow):
         self._refresh_export_buttons()
 
     def _append_list_item(self, idx: int) -> None:
+        # Block signals while building the item so that itemChanged /
+        # currentRowChanged don't fire mid-loop while _entries is still
+        # being populated.
+        self._file_list.blockSignals(True)
         entry = self._entries[idx]
         item = QListWidgetItem()
         item.setText(self._item_text(entry))
@@ -469,6 +495,7 @@ class MainWindow(QMainWindow):
         item.setData(Qt.ItemDataRole.UserRole, idx)
         item.setSizeHint(QSize(220, 54))
         self._file_list.addItem(item)
+        self._file_list.blockSignals(False)
         if self._file_list.count() == 1:
             self._file_list.setCurrentRow(0)
 
@@ -496,10 +523,15 @@ class MainWindow(QMainWindow):
 
     def _enqueue(self, idx: int) -> None:
         self._queue.append(idx)
-        if self._worker is None or not self._worker.isRunning():
+        # Kick off the queue only if nothing is running.  We do NOT check
+        # isRunning() here to avoid the race where start() hasn't returned
+        # yet; instead _process_queue guards itself with _worker_running.
+        if not self._worker_running:
             self._process_queue()
 
     def _process_queue(self) -> None:
+        if self._worker_running:
+            return
         while self._queue:
             idx = self._queue.pop(0)
             entry = self._entries[idx]
@@ -509,13 +541,22 @@ class MainWindow(QMainWindow):
                 continue
             entry.status = "analysing"
             self._refresh_item(idx)
+            # Disconnect previous worker's signals before replacing it.
+            if self._worker is not None:
+                try:
+                    self._worker.finished.disconnect()
+                    self._worker.error.disconnect()
+                except RuntimeError:
+                    pass
+            self._worker_running = True
             self._worker = _AnalysisWorker(idx, entry.path)
             self._worker.finished.connect(self._on_analysis_done)
             self._worker.error.connect(self._on_analysis_error)
             self._worker.start()
-            return  # one at a time; next starts in callback
+            return  # one at a time; _worker_running cleared in callbacks
 
     def _on_analysis_done(self, idx: int, result: AnalysisResult) -> None:
+        self._worker_running = False
         entry = self._entries[idx]
         entry.result = result
         entry.chorus_start = result.chorus_start
@@ -527,6 +568,7 @@ class MainWindow(QMainWindow):
         self._process_queue()
 
     def _on_analysis_error(self, idx: int, _msg: str) -> None:
+        self._worker_running = False
         self._entries[idx].status = "error"
         self._refresh_item(idx)
         self._process_queue()
@@ -571,6 +613,9 @@ class MainWindow(QMainWindow):
         self._player.setSource(QUrl.fromLocalFile(entry.path))
 
     # ── Transport ─────────────────────────────────────────────────────────────
+
+    def _on_fade_in_toggled(self, checked: bool) -> None:
+        self._fade_in_spin.setEnabled(checked)
 
     def _toggle_playback(self) -> None:
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -637,6 +682,8 @@ class MainWindow(QMainWindow):
                     source_path=entry.path,
                     dest_path=dest,
                     start_seconds=entry.chorus_start,
+                    fade_in_ms=int(self._fade_in_spin.value() * 1000)
+                    if self._fade_in_btn.isChecked() else 0,
                     normalize=self._norm_btn.isChecked(),
                 )
             except FileNotFoundError as exc:

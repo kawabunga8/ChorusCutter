@@ -13,6 +13,7 @@ def export(
     dest_path: str,
     start_seconds: float,
     end_seconds: float | None = None,
+    fade_in_ms: int = 0,
     fade_out_ms: int = 2000,
     normalize: bool = False,
 ) -> None:
@@ -48,6 +49,9 @@ def export(
 
     if normalize:
         trimmed = effects.normalize(trimmed)
+
+    if fade_in_ms > 0 and len(trimmed) > fade_in_ms:
+        trimmed = trimmed.fade_in(fade_in_ms)
 
     if fade_out_ms > 0 and len(trimmed) > fade_out_ms:
         trimmed = trimmed.fade_out(fade_out_ms)
