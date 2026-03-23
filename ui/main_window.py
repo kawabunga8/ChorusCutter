@@ -250,6 +250,7 @@ class MainWindow(QMainWindow):
         self._gain_spin.setSuffix(" dB")
         self._gain_spin.setValue(0.0)
         self._gain_spin.setFixedWidth(84)
+        self._gain_spin.valueChanged.connect(self._on_gain_changed)
         lo.addWidget(self._gain_spin)
 
         return bar
@@ -691,13 +692,22 @@ class MainWindow(QMainWindow):
         self._fade_in_spin.setValue(duration)
         self._fade_in_spin.blockSignals(False)
 
+    def _playback_volume(self) -> float:
+        """Linear volume (0–1) corresponding to the current gain setting."""
+        return min(1.0, 10 ** (self._gain_spin.value() / 20.0))
+
+    def _on_gain_changed(self, _value: float) -> None:
+        """Update playback volume immediately if audio is playing."""
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._audio_output.setVolume(self._playback_volume())
+
     def _toggle_playback(self) -> None:
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
-            self._audio_output.setVolume(1.0)
             self._meter_timer.stop()
         else:
             self._peak_meter.reset()
+            vol = self._playback_volume()
             if self._fade_in_btn.isChecked():
                 fade_ms = int(self._fade_in_spin.value() * 1000)
                 fade_start_ms = max(0, int(self._start_spin.value() * 1000) - fade_ms)
@@ -707,12 +717,12 @@ class MainWindow(QMainWindow):
                 anim = QPropertyAnimation(self._audio_output, b"volume", self)
                 anim.setDuration(fade_ms)
                 anim.setStartValue(0.0)
-                anim.setEndValue(1.0)
+                anim.setEndValue(vol)
                 anim.setEasingCurve(QEasingCurve.Type.InQuad)
                 anim.start()
                 self._fade_anim = anim
             else:
-                self._audio_output.setVolume(1.0)
+                self._audio_output.setVolume(vol)
                 self._player.setPosition(int(self._start_spin.value() * 1000))
                 self._player.play()
             self._meter_timer.start()
