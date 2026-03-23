@@ -330,6 +330,7 @@ class MainWindow(QMainWindow):
         self._norm_btn.setCheckable(True)
         self._norm_btn.setFixedSize(90, 34)
         self._norm_btn.setToolTip("Peak-normalize audio on export")
+        self._norm_btn.toggled.connect(lambda _: self._update_waveform_scale())
         lo.addWidget(self._norm_btn)
 
         lo.addSpacing(8)
@@ -667,6 +668,7 @@ class MainWindow(QMainWindow):
         self._start_spin.setEnabled(True)
         self._play_btn.setEnabled(True)
 
+        self._update_waveform_scale()
         self._player.stop()
         self._player.setSource(QUrl.fromLocalFile(entry.path))
 
@@ -697,9 +699,26 @@ class MainWindow(QMainWindow):
         return min(1.0, 10 ** (self._gain_spin.value() / 20.0))
 
     def _on_gain_changed(self, _value: float) -> None:
-        """Update playback volume immediately if audio is playing."""
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._audio_output.setVolume(self._playback_volume())
+        self._update_waveform_scale()
+
+    def _update_waveform_scale(self) -> None:
+        """Recompute waveform scale from current gain + normalize settings."""
+        if self._active_idx < 0:
+            return
+        entry = self._entries[self._active_idx]
+        if entry.result is None:
+            return
+        y = entry.result.y
+        gain_lin  = 10 ** (self._gain_spin.value() / 20.0)
+        normalize = self._norm_btn.isChecked()
+        if normalize:
+            peak = float(np.max(np.abs(y)))
+            scale = (1.0 / peak) if peak > 0 else 1.0
+        else:
+            scale = gain_lin
+        self._waveform.set_scale(scale)
 
     def _toggle_playback(self) -> None:
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
