@@ -96,25 +96,15 @@ def build() -> None:
     icon_file = _make_icon(resources_dir) or ""
     print("done" if icon_file else "skipped (sips unavailable)")
 
-    # Python launcher — shebang points directly to the venv interpreter so
-    # Python (not bash) is the main process macOS tracks.  This is required
-    # for Qt's Cocoa integration to work correctly from an .app bundle.
-    launcher = macos_dir / APP_NAME
-    launcher.write_text(
-        f"#!{VENV_PYTHON}\n"
+    # Write the Python startup script (not the executable — see below).
+    startup = PROJECT_DIR / "_app_startup.py"
+    startup.write_text(
         f"import os, sys\n"
         f"os.chdir(r'{PROJECT_DIR}')\n"
         f"sys.path.insert(0, r'{PROJECT_DIR}')\n"
-        f"\n"
-        f"# Homebrew PATH so ffmpeg/ffprobe are found from the .app bundle.\n"
         f"for _b in ('/opt/homebrew/bin', '/usr/local/bin'):\n"
         f"    if _b not in os.environ.get('PATH', ''):\n"
         f"        os.environ['PATH'] = _b + ':' + os.environ.get('PATH', '')\n"
-        f"\n"
-        f"# Import heavy modules first (matplotlib etc.), then create everything.\n"
-        f"# Total startup is ~2-3 s — within macOS's 5 s 'not responding' window.\n"
-        f"# Do NOT call processEvents() before MainWindow: it can process Finder\n"
-        f"# Apple Events before Qt is ready and cause the constructor to hang.\n"
         f"from PyQt6.QtWidgets import QApplication\n"
         f"from ui.main_window import MainWindow\n"
         f"_app = QApplication(sys.argv)\n"
@@ -124,9 +114,50 @@ def build() -> None:
         f"_win.activateWindow()\n"
         f"sys.exit(_app.exec())\n"
     )
-    launcher.chmod(
-        launcher.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH
+
+    # Compile a real Mach-O launcher.  A Python shebang script is NOT
+    # treated as a proper GUI app by macOS Launch Services — it bounces in
+    # the Dock forever and never registers a window.  A compiled binary as
+    # CFBundleExecutable gets registered immediately; it then exec()s Python.
+    launcher = macos_dir / APP_NAME
+    c_src = macos_dir / "launcher.c"
+    c_src.write_text(f"""\
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+static const char *PYTHON  = "{VENV_PYTHON}";
+static const char *STARTUP = "{startup}";
+
+int main(int argc, char *argv[]) {{
+    /* Build new argv: python startup.py [original args except argv[0]] */
+    char **args = malloc((argc + 2) * sizeof(char *));
+    if (!args) return 1;
+    args[0] = (char *)PYTHON;
+    args[1] = (char *)STARTUP;
+    for (int i = 1; i < argc; i++) args[i + 1] = argv[i];
+    args[argc + 1] = NULL;
+    execv(PYTHON, args);
+    perror("ChorusCutter: execv failed");
+    return 1;
+}}
+""")
+    result = subprocess.run(
+        ["clang", "-O2", "-o", str(launcher), str(c_src)],
+        capture_output=True, text=True,
     )
+    c_src.unlink(missing_ok=True)
+    if result.returncode != 0:
+        print(f"  WARNING: clang failed ({result.stderr.strip()})")
+        print("  Falling back to Python shebang launcher (may not open from Finder)")
+        launcher.write_text(
+            f"#!{VENV_PYTHON}\n"
+            f"exec(open(r'{startup}').read())\n"
+        )
+        launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    else:
+        print("  Compiled Mach-O launcher: ok")
 
     # Info.plist
     (BUNDLE / "Contents" / "Info.plist").write_text(f"""\
