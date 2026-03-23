@@ -247,16 +247,6 @@ class MainWindow(QMainWindow):
         self._gain_spin.setFixedWidth(84)
         lo.addWidget(self._gain_spin)
 
-        self._compress_btn = QPushButton("Compress")
-        self._compress_btn.setObjectName("normBtn")
-        self._compress_btn.setCheckable(True)
-        self._compress_btn.setFixedSize(84, 26)
-        self._compress_btn.setToolTip(
-            "Apply gentle downward compression on export\n"
-            "(threshold −12 dBFS, ratio 4:1)"
-        )
-        lo.addWidget(self._compress_btn)
-
         return bar
 
     def _make_transport(self) -> QWidget:
@@ -808,7 +798,6 @@ class MainWindow(QMainWindow):
                     fade_in_curve=self._fade_curve_combo.currentText().lower(),
                     normalize=self._norm_btn.isChecked(),
                     gain_db=self._gain_spin.value(),
-                    compress=self._compress_btn.isChecked(),
                 )
             except FileNotFoundError as exc:
                 if "ffprobe" in str(exc) or "ffmpeg" in str(exc):
