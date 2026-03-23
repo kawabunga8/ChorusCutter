@@ -202,22 +202,36 @@ class MainWindow(QMainWindow):
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
 
+        # Waveform + vertical peak meter side by side.
+        wave_row = QWidget()
+        wave_lo  = QHBoxLayout(wave_row)
+        wave_lo.setContentsMargins(0, 0, 0, 0)
+        wave_lo.setSpacing(0)
+
         self._waveform = WaveformWidget(panel)
         self._waveform.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._waveform.marker_moved.connect(self._on_marker_moved)
         self._waveform.fade_changed.connect(self._on_waveform_fade_changed)
-        vbox.addWidget(self._waveform, stretch=1)
+        wave_lo.addWidget(self._waveform, stretch=1)
+
+        self._peak_meter = PeakMeterWidget()
+        self._peak_meter.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
+        )
+        wave_lo.addWidget(self._peak_meter)
+
+        vbox.addWidget(wave_row, stretch=1)
 
         vbox.addWidget(self._make_divider())
-        vbox.addWidget(self._make_meter_strip())
+        vbox.addWidget(self._make_gain_strip())
         vbox.addWidget(self._make_divider())
         vbox.addWidget(self._make_transport())
 
         return panel
 
-    def _make_meter_strip(self) -> QWidget:
+    def _make_gain_strip(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("meterStrip")
         bar.setFixedHeight(36)
@@ -225,16 +239,7 @@ class MainWindow(QMainWindow):
         lo.setContentsMargins(16, 0, 16, 0)
         lo.setSpacing(10)
 
-        lo.addWidget(_muted("LEVEL"))
-        lo.addSpacing(4)
-
-        self._peak_meter = PeakMeterWidget()
-        self._peak_meter.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        lo.addWidget(self._peak_meter, stretch=1)
-
-        lo.addSpacing(12)
+        lo.addStretch()
         lo.addWidget(_muted("GAIN"))
 
         self._gain_spin = QDoubleSpinBox()
