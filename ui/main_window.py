@@ -395,7 +395,7 @@ class MainWindow(QMainWindow):
     # ── Stylesheet ────────────────────────────────────────────────────────────
 
     def _apply_style(self) -> None:
-        f = "-apple-system, 'Helvetica Neue', Arial, sans-serif"
+        f = "Helvetica Neue, 'Helvetica Neue', Arial, sans-serif"
         self.setStyleSheet(f"""
             QMainWindow, QWidget#root, QWidget#rightPanel {{
                 background: {_BG};
@@ -746,7 +746,7 @@ class MainWindow(QMainWindow):
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         playing = state == QMediaPlayer.PlaybackState.PlayingState
         self._play_btn.setText("⏸  Pause" if playing else "▶  Play")
-        f = "-apple-system"
+        f = "Helvetica Neue"
         self._play_btn.setStyleSheet(
             f"QPushButton#playBtn {{ background: {_AMBER}; color: #000; border: none;"
             f" border-radius: 8px; font: bold 13px {f}; }}"
@@ -862,5 +862,5 @@ class MainWindow(QMainWindow):
 
 def _muted(text: str) -> QLabel:
     lbl = QLabel(text)
-    lbl.setStyleSheet("color: #48484d; font: 10px -apple-system;")
+    lbl.setStyleSheet("color: #48484d; font: 10px Helvetica Neue;")
     return lbl
