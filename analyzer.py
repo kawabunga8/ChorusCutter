@@ -8,9 +8,6 @@ self-similarity / structural segmentation approach.
 from dataclasses import dataclass
 
 import numpy as np
-import librosa
-import librosa.segment
-import librosa.feature
 
 
 @dataclass
@@ -44,6 +41,13 @@ def analyze(filepath: str) -> AnalysisResult:
     -------
     AnalysisResult
     """
+    # Lazy import so the module loads instantly at app startup (librosa is
+    # heavy and would block the main thread long enough for macOS to report
+    # the app as "not responding" before Qt's event loop starts).
+    import librosa
+    import librosa.segment
+    import librosa.feature
+
     y, sr = librosa.load(filepath, mono=True)
     duration = librosa.get_duration(y=y, sr=sr)
 
