@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFrame,
     QLabel, QDoubleSpinBox, QPushButton, QFileDialog,
     QMessageBox, QSizePolicy, QListWidget, QListWidgetItem,
-    QSplitter, QLineEdit, QComboBox,
+    QSplitter, QLineEdit, QComboBox, QDial,
 )
 
 from analyzer import analyze, AnalysisResult
@@ -234,13 +234,24 @@ class MainWindow(QMainWindow):
     def _make_gain_strip(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName("meterStrip")
-        bar.setFixedHeight(36)
+        bar.setFixedHeight(56)
         lo = QHBoxLayout(bar)
-        lo.setContentsMargins(16, 0, 16, 0)
-        lo.setSpacing(10)
+        lo.setContentsMargins(16, 4, 16, 4)
+        lo.setSpacing(8)
 
         lo.addStretch()
         lo.addWidget(_muted("GAIN"))
+
+        # Rotary dial — range ×10 so we get 0.1 dB resolution.
+        self._gain_dial = QDial()
+        self._gain_dial.setObjectName("gainDial")
+        self._gain_dial.setRange(-200, 200)   # maps to -20.0 … +20.0 dB
+        self._gain_dial.setValue(0)
+        self._gain_dial.setFixedSize(44, 44)
+        self._gain_dial.setNotchesVisible(True)
+        self._gain_dial.setWrapping(False)
+        self._gain_dial.valueChanged.connect(self._on_dial_changed)
+        lo.addWidget(self._gain_dial)
 
         self._gain_spin = QDoubleSpinBox()
         self._gain_spin.setObjectName("startSpin")
@@ -254,6 +265,18 @@ class MainWindow(QMainWindow):
         lo.addWidget(self._gain_spin)
 
         return bar
+
+    def _on_dial_changed(self, int_val: int) -> None:
+        db = int_val / 10.0
+        self._gain_spin.blockSignals(True)
+        self._gain_spin.setValue(db)
+        self._gain_spin.blockSignals(False)
+        self._on_gain_changed(db)
+
+    def _sync_dial(self, db: float) -> None:
+        self._gain_dial.blockSignals(True)
+        self._gain_dial.setValue(int(round(db * 10)))
+        self._gain_dial.blockSignals(False)
 
     def _make_transport(self) -> QWidget:
         bar = QWidget()
@@ -522,6 +545,13 @@ class MainWindow(QMainWindow):
             QPushButton#exportBtn:pressed {{ background: #0070e0; }}
             QPushButton#exportBtn:disabled {{ background: {_SURF2}; color: {_TEXT3}; }}
             QFrame#divider {{ background: {_BORDER}; border: none; }}
+            QDial#gainDial {{
+                background: {_SURF2};
+                color: {_BLUE};
+            }}
+            QDial#gainDial::handle {{
+                background: {_BLUE};
+            }}
         """)
 
     # ── File management ───────────────────────────────────────────────────────
@@ -698,7 +728,8 @@ class MainWindow(QMainWindow):
         """Linear volume (0–1) corresponding to the current gain setting."""
         return min(1.0, 10 ** (self._gain_spin.value() / 20.0))
 
-    def _on_gain_changed(self, _value: float) -> None:
+    def _on_gain_changed(self, value: float) -> None:
+        self._sync_dial(value)
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._audio_output.setVolume(self._playback_volume())
         self._update_waveform_scale()
