@@ -18,7 +18,9 @@ Layout
 import os
 from dataclasses import dataclass
 
-from PyQt6.QtCore import Qt, QSize, QThread, QUrl, QPropertyAnimation, QEasingCurve, pyqtSignal
+import numpy as np
+
+from PyQt6.QtCore import Qt, QSize, QThread, QUrl, QPropertyAnimation, QEasingCurve, QTimer, pyqtSignal
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFrame,
@@ -29,6 +31,7 @@ from PyQt6.QtWidgets import (
 
 from analyzer import analyze, AnalysisResult
 from waveform_widget import WaveformWidget
+from peak_meter_widget import PeakMeterWidget
 from exporter import export
 
 
@@ -94,6 +97,10 @@ class MainWindow(QMainWindow):
         self._player.setAudioOutput(self._audio_output)
         self._audio_output.setVolume(1.0)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
+
+        self._meter_timer = QTimer(self)
+        self._meter_timer.setInterval(50)
+        self._meter_timer.timeout.connect(self._update_meter)
 
         self._build_ui()
 
@@ -204,9 +211,53 @@ class MainWindow(QMainWindow):
         vbox.addWidget(self._waveform, stretch=1)
 
         vbox.addWidget(self._make_divider())
+        vbox.addWidget(self._make_meter_strip())
+        vbox.addWidget(self._make_divider())
         vbox.addWidget(self._make_transport())
 
         return panel
+
+    def _make_meter_strip(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("meterStrip")
+        bar.setFixedHeight(36)
+        lo = QHBoxLayout(bar)
+        lo.setContentsMargins(16, 0, 16, 0)
+        lo.setSpacing(10)
+
+        lo.addWidget(_muted("LEVEL"))
+        lo.addSpacing(4)
+
+        self._peak_meter = PeakMeterWidget()
+        self._peak_meter.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        lo.addWidget(self._peak_meter, stretch=1)
+
+        lo.addSpacing(12)
+        lo.addWidget(_muted("GAIN"))
+
+        self._gain_spin = QDoubleSpinBox()
+        self._gain_spin.setObjectName("startSpin")
+        self._gain_spin.setRange(-20.0, 20.0)
+        self._gain_spin.setDecimals(1)
+        self._gain_spin.setSingleStep(0.5)
+        self._gain_spin.setSuffix(" dB")
+        self._gain_spin.setValue(0.0)
+        self._gain_spin.setFixedWidth(84)
+        lo.addWidget(self._gain_spin)
+
+        self._compress_btn = QPushButton("Compress")
+        self._compress_btn.setObjectName("normBtn")
+        self._compress_btn.setCheckable(True)
+        self._compress_btn.setFixedSize(84, 26)
+        self._compress_btn.setToolTip(
+            "Apply gentle downward compression on export\n"
+            "(threshold −12 dBFS, ratio 4:1)"
+        )
+        lo.addWidget(self._compress_btn)
+
+        return bar
 
     def _make_transport(self) -> QWidget:
         bar = QWidget()
@@ -349,7 +400,8 @@ class MainWindow(QMainWindow):
             QMainWindow, QWidget#root, QWidget#rightPanel {{
                 background: {_BG};
             }}
-            QWidget#header, QWidget#transport, QWidget#exportBar {{
+            QWidget#header, QWidget#transport, QWidget#exportBar,
+            QWidget#meterStrip {{
                 background: {_SURFACE};
             }}
             QWidget#fileListPanel {{
@@ -648,12 +700,11 @@ class MainWindow(QMainWindow):
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
             self._audio_output.setVolume(1.0)
+            self._meter_timer.stop()
         else:
-            self._player.setPosition(int(self._start_spin.value() * 1000))
+            self._peak_meter.reset()
             if self._fade_in_btn.isChecked():
                 fade_ms = int(self._fade_in_spin.value() * 1000)
-                # Seek to fade start (before the chorus marker) so playback
-                # naturally covers the fade region leading up to the red line.
                 fade_start_ms = max(0, int(self._start_spin.value() * 1000) - fade_ms)
                 self._audio_output.setVolume(0.0)
                 self._player.setPosition(fade_start_ms)
@@ -664,10 +715,33 @@ class MainWindow(QMainWindow):
                 anim.setEndValue(1.0)
                 anim.setEasingCurve(QEasingCurve.Type.InQuad)
                 anim.start()
-                self._fade_anim = anim   # keep reference alive
+                self._fade_anim = anim
             else:
                 self._audio_output.setVolume(1.0)
+                self._player.setPosition(int(self._start_spin.value() * 1000))
                 self._player.play()
+            self._meter_timer.start()
+
+    def _update_meter(self) -> None:
+        """Poll playback position and update peak meter from pre-loaded samples."""
+        if self._active_idx < 0:
+            return
+        entry = self._entries[self._active_idx]
+        if entry.result is None:
+            return
+        r = entry.result
+        pos_ms = self._player.position()
+        center = int(pos_ms / 1000 * r.sr)
+        half   = int(0.025 * r.sr)          # 25 ms half-window
+        s = max(0, center - half)
+        e = min(len(r.y), center + half)
+        if s >= e:
+            return
+        chunk    = r.y[s:e]
+        peak_lin = float(np.max(np.abs(chunk)))
+        gain_lin = 10 ** (self._gain_spin.value() / 20.0)
+        db       = 20.0 * np.log10(max(peak_lin * gain_lin, 1e-9))
+        self._peak_meter.set_level(db)
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         playing = state == QMediaPlayer.PlaybackState.PlayingState
@@ -679,6 +753,8 @@ class MainWindow(QMainWindow):
             f"QPushButton#playBtn:hover {{ background: #ffb340; }}"
             if playing else ""
         )
+        if not playing:
+            self._meter_timer.stop()
 
     def _on_marker_moved(self, t: float) -> None:
         self._start_spin.blockSignals(True)
@@ -731,6 +807,8 @@ class MainWindow(QMainWindow):
                     if self._fade_in_btn.isChecked() else 0,
                     fade_in_curve=self._fade_curve_combo.currentText().lower(),
                     normalize=self._norm_btn.isChecked(),
+                    gain_db=self._gain_spin.value(),
+                    compress=self._compress_btn.isChecked(),
                 )
             except FileNotFoundError as exc:
                 if "ffprobe" in str(exc) or "ffmpeg" in str(exc):

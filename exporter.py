@@ -18,9 +18,13 @@ def export(
     fade_in_curve: str = "linear",
     fade_out_ms: int = 2000,
     normalize: bool = False,
+    gain_db: float = 0.0,
+    compress: bool = False,
 ) -> None:
     """
-    Load *source_path*, trim, optionally fade-in/out and normalize, then write.
+    Load *source_path*, trim, optionally process, then write.
+
+    Processing chain (in order): compress → gain → normalize → fade-in → fade-out.
 
     The fade-in is applied to the audio leading up to *start_seconds*; the
     exported clip therefore begins *fade_in_ms* before the chorus start so
@@ -30,6 +34,10 @@ def export(
     ----------
     fade_in_curve : str
         One of 'linear', 'exponential', 'logarithmic', 's-curve'.
+    gain_db : float
+        dB gain applied after compression/before normalization.
+    compress : bool
+        Apply a gentle downward compressor (threshold -12 dBFS, ratio 4:1).
     """
     ext = os.path.splitext(source_path)[1].lower().lstrip(".")
     audio = AudioSegment.from_file(source_path, format=ext if ext else "mp3")
@@ -43,6 +51,14 @@ def export(
     clip_end   = max(clip_start, min(end_ms, len(audio)))
 
     trimmed = audio[clip_start:clip_end]
+
+    if compress:
+        trimmed = effects.compress_dynamic_range(
+            trimmed, threshold=-12.0, ratio=4.0, attack=5.0, release=50.0
+        )
+
+    if gain_db != 0.0:
+        trimmed = trimmed + gain_db   # pydub's + operator applies dB gain
 
     if normalize:
         trimmed = effects.normalize(trimmed)
